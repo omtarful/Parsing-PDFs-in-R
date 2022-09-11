@@ -1,0 +1,276 @@
+#required packages
+library("pdftools")
+library("tidyverse")
+library("lubridate")
+
+
+#code to set directory of R script to current working directory
+library(rstudioapi)
+# Getting the path of your current open file
+current_path = rstudioapi::getActiveDocumentContext()$path 
+setwd(dirname(current_path ))
+
+
+
+pdf_to_csv = function(pdf)
+{
+  #function converts pdf to dataframe and cleans the dataframe 
+  pdf_vector = c()
+  pdf.text <- pdftools::pdf_text(pdf) 
+  for (i in 104:length(pdf.text)) {
+    pdf_vector = c(pdf_vector, page_to_vector(pdf.text[i]))
+  }
+  
+  transactions.df = vector_to_df(pdf_vector)
+  #clean transactions.df
+  #remove " (.cont)"
+  transactions.df$Name = str_replace(string = transactions.df$Name, pattern = fixed(" (cont.)"), replacement = "")
+  #replace incomplete names (aka names that end with ...) with complete names
+  incomplete_names_i = grep(pattern = "\\.\\.\\.", x = transactions.df$Name, perl = TRUE)
+  #replace with complete names
+  incomplete_names = unique(transactions.df$Name[incomplete_names_i])
+  incomplete_names = substr(incomplete_names, 1, nchar(incomplete_names) - 3)
+  #find complete names counterpart
+  completed_names = unique(grep(pattern = paste(paste(incomplete_names, collapse = "|"), "|(IC)"), x = transactions.df$Name[-incomplete_names_i], perl = TRUE, value = TRUE))
+  #now replace incomplete names with completed names
+  completed_names.df = unique(transactions.df[which(transactions.df$Name %in% completed_names),c("Name", "ID")])
+  
+  #replace strings
+  for (i in 1:nrow(completed_names.df)) {
+    transactions.df[which(transactions.df$ID == completed_names.df$ID[i]),"Name"] = completed_names.df$Name[i]
+  }
+  
+  
+  #convert columns 4 to 12 to double
+  for (i in 4:12) {
+    transactions.df[,i] = unlist(map(transactions.df[,i], function(x){
+      x = str_replace(string = x, pattern = ",", replacement = "")
+      as.double(x)
+    }))
+  }
+  #fill NAs with 0
+  transactions.df[is.na.data.frame(transactions.df)] = 0
+  #convert character to date
+  transactions.df$CheckDate =  as.Date(transactions.df$CheckDate, "%m/%d/%y")
+  transactions.df$CheckDate = as.Date(transactions.df$CheckDate, "%Y-%m-%d")
+  #convert mdy to ymd
+  return(transactions.df)
+}
+
+page_to_vector = function(page_text)
+{
+  #function trims lower and upper part of page that we don't need by
+  #splitting into lines them removing what we don't need
+  #keeps the important info, the proceeds to take the lines 
+  #that have the info we need a.k.a columns
+  #then splits it into a vector
+  
+  page_vector = strsplit(page_text, split = "\n", perl = TRUE)[[1]]
+  #remove first 12 lines and last 4 lines
+  start_index = grep(pattern = "RATE", page_vector)
+  end_index = max(grep(pattern = "0942 1409-6262 GENERAL MARKETING LLC", page_vector))
+  
+  trimmed_page_vector = page_vector[(start_index+1):(end_index-1)]
+  
+  #remove empty strings
+  trimmed_page_vector = trimmed_page_vector[-which("" == trimmed_page_vector)]
+  #get lines that have words that are relevant
+  #name make a regex
+  #id make a regex or find pattern
+  #Hourly (same word)
+  #Salary (same word)
+  #Overtime (same word)
+  #Bonus (same word)
+  #Comissions (same word)
+  #1099Indepent (same word)
+  #SocialSecurity (Social Security)
+  #Medicare (Medicare)
+  #FedIncomeTax (Fed Income Tax)
+  name_regex = "^[A-Z]{1}[a-z]+ ?([A-Z][a-z]+)?[\\-\\,]{1} ?[A-Za-z]+|(\\.\\.\\.)$"
+  pattern =  paste(name_regex, "|^[0-9]+|Hourly|Salary|Overtime|Bonus|Comissions|1099 Indepent|Social Security|Medicare|Fed Income Tax")
+  relevant_line_index = grep(pattern, x = trimmed_page_vector, perl = TRUE)
+  trimmed_page_vector_relevant = trimmed_page_vector[relevant_line_index]
+  #check date marks the end of a transaction
+  #when check data is encountered we can assume another row will start
+
+  #split element to analyze one by one
+  relevant_words = unlist(str_split(trimmed_page_vector, pattern = "\\s{2,}"))
+  return(relevant_words)
+  
+}
+
+vector_to_df = function(relevant_words)
+{
+  #function takes the vector from vector_to_df() and makes a dataframe out of it
+  #if we wanna obtain a complete dataframe we need to have a vector of all the pages
+  #
+  col_names = c("Name", "ID", "CheckDate", "Hourly", "Salary", "Overtime", "Bonus", "Commissions", "1099Indepent", "SocialSecurity", "Medicare", "FedIncomeTax")
+  transactions.df = data.frame(matrix(ncol =12, nrow = 0))
+  colnames(transactions.df) = col_names
+  
+  #loop through every element and create row out of it
+  last_name = ""
+  last_id = ""
+  row = rep("0", 12)
+  names(row) = col_names
+  for (i in 1:length(relevant_words)) {
+    names(row) = col_names
+    name_regex = "^[A-Z]{1}[a-z]+ ?([A-Z][a-z]+)?[\\-\\,]{1} ?[A-Za-z]+|(\\.\\.\\.)$"
+    name_found = grepl(pattern = name_regex, relevant_words[i], perl = TRUE)
+    #moved to a new person
+    id_found = grepl(pattern = "^[0-9]+$", relevant_words[i])
+    #new name found
+    if(name_found & (relevant_words[i] != last_name))
+    {
+      last_name = relevant_words[i]
+      row["Name"] = relevant_words[i]
+      
+      
+    }
+    else{
+      #still processing the transaction of the same person
+      row["Name"] = last_name
+    }
+    
+    if((id_found & (relevant_words[i] != last_id)))
+    {
+      last_id = relevant_words[i]
+      row["ID"] = relevant_words[i]
+      
+    }
+    else{
+      #still processing the transaction of the same person
+      row["ID"] = last_id
+    }
+    if(relevant_words[i] %in% col_names)
+    {
+      if(relevant_words[i] == "Hourly" | relevant_words[i] == "Overtime")
+      {
+        #if the Hourly is negative
+        if(grepl(pattern = "^-", x = relevant_words[i+1], perl = TRUE))
+        {
+          row[relevant_words[i]] = relevant_words[i+2]
+        }
+        else
+        {
+          #variable at i + 2 is a word
+          if(grepl(pattern = "[a-z]", x = relevant_words[i+2]))
+          {
+            row[relevant_words[i]] = relevant_words[i+1]
+            
+          }
+          else
+          {
+            row[relevant_words[i]] = relevant_words[i+3]
+          }
+        }
+        
+      }
+      else if(relevant_words[i] == "Bonus")
+      {
+        #variable with 4 decimal digits are in the rate column
+        #so if it's 4 digits use the number after
+        if(grepl(pattern = "\\.[0-9]{4}", x = relevant_words[i+1]))
+        {
+          row[relevant_words[i]] = relevant_words[i+2]
+        }
+        else
+        {
+          row[relevant_words[i]] = relevant_words[i+1]
+        }
+      }
+      else if(relevant_words[i] == "Salary")
+      {
+        #if it starts with M, it's not getting the correct column
+        if(grepl(pattern = "^M", x = relevant_words[i+1], perl = TRUE))
+        {
+          row[relevant_words[i]] = relevant_words[i+2]
+        }
+        else if(grepl(pattern = "(\\.[0-9]{4})", x = relevant_words[i+1], perl = TRUE))
+        {
+          #check it's getting a number and not a character
+          if(grepl(relevant_words[i+3], pattern = "[0-9]", perl = TRUE))
+          {
+            row[relevant_words[i]] = relevant_words[i+3]
+          }
+          else
+          {
+            row[relevant_words[i]] = relevant_words[i+2]
+          }
+        }
+        else
+        {
+          row[relevant_words[i]] = relevant_words[i+1]
+        }
+      }
+      else if(relevant_words[i] == "Commissions")
+      {
+        if(grepl(pattern = "\\.[0-9]{4}", x = relevant_words[i+1]))
+        {
+          row[relevant_words[i]] = relevant_words[i+2]
+        }
+        else
+        {
+          row[relevant_words[i]] = relevant_words[i+1]
+        }
+      }
+      else
+      {
+        #remove characters and dashes
+        row[relevant_words[i]] = str_replace_all(string = relevant_words[i+1], pattern = "[A-Za-z\\- ]+$", replacement = "") 
+      }
+      
+    }
+    else if(relevant_words[i] == "Fed Income Tax")
+    {
+      row["FedIncomeTax"] =str_replace_all(string = relevant_words[i+1], pattern = "[A-Za-z\\- ]+$", replacement = "") 
+    }
+    else if(relevant_words[i] == "Social Security")
+    {
+      row["SocialSecurity"] = str_replace_all(string = relevant_words[i+1], pattern = "[A-Za-z\\- ]+$", replacement = "") 
+    }
+    else if(relevant_words[i] == "1099 Indepent")
+    {
+      #when it has 4 digits, it's means it's not in the correct column
+      if(grepl(pattern = "\\.[0-9]{4}", x = relevant_words[i+1], perl = TRUE))
+      {
+        row["1099Indepent"] = relevant_words[i+3]
+      }
+      else
+      {
+        row["1099Indepent"] = relevant_words[i+1]
+      }
+      
+    }
+    
+    else if(grepl(pattern = "CHECK DATE", relevant_words[i]))
+    {
+      #finished processing transaction
+      row["CheckDate"] = str_split(relevant_words[i], pattern = " ")[[1]][3]
+      #restart row and make new transaction
+
+      transactions.df[nrow(transactions.df)+1,] = row
+      row = rep("0", 12)
+    }
+    else
+    {
+      next
+    }
+    
+  }
+  return(transactions.df)
+}
+
+
+
+pdf = "General 2019.pdf"
+transactions.df = pdf_to_csv(pdf)
+
+#verify everything is correct 
+length( unique( transactions.df$ID))
+nrow(transactions.df)
+sum(transactions.df$`1099Indepent`)
+format(sum( transactions.df[ , 4:8]), nsmall = 2)
+
+#write to file
+write.csv(transactions.df, "payroll_journal.csv", row.names = FALSE)

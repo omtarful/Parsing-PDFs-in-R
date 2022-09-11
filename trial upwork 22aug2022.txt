@@ -1,0 +1,15 @@
+Job: transform payroll file into tidy csv
+
+Input: General 2019.pdf
+
+Output: table with 2832 rows and 12 columns
+
+First row contains column names (Name, ID, CheckDate, Hourly, Salary, Overtime, Bonus, Commissions, 1099Indepent, SocalSecirity, Medicare, FedIncomeTax)
+
+Every next row has data for each paycheck, with 12 data points: 
+Name and ID are text, CheckDate is YMD date, and the rest are numeric, per amounts (in columns Earnings, Reimb & other payments or Witholdings) as specified in each check - when it is not present, please mark 0.
+
+For example, row that contains first check is:
+"Afalava, Leoalii", "6", "2019-07-19", 0, 0, 0, 0, 180.00, 11.16, 2.61, 0
+
+
